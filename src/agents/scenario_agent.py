@@ -1,7 +1,9 @@
 import json
 import random
+import os
 
 from langchain_ollama.chat_models import ChatOllama  # 导入 ChatOllama 模型
+from langchain_openai import ChatOpenAI  # 导入 ChatOpenAI 模型
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder  # 导入提示模板相关类
 from langchain_core.messages import HumanMessage, AIMessage  # 导入人类消息类和AI消息类
 from langchain_core.runnables.history import RunnableWithMessageHistory  # 导入带有消息历史的可运行类
@@ -10,16 +12,14 @@ from .session_history import get_session_history  # 导入会话历史相关方�
 from utils.logger import LOG
 
 class ScenarioAgent:
-    def __init__(self, scenario_name):
-        self.name = scenario_name
-        self.prompt_file = f"prompts/{self.name}_prompt.txt"
-        self.intro_file = f"content/intro/{self.name}.json"
+    def __init__(self, scenario):
+        self.scenario = scenario
+        self.prompt_file = os.path.join("prompts", f"{scenario}_prompt.txt")
+        self.intro_file = os.path.join("content", "intro", f"{scenario}.json")
         self.prompt = self.load_prompt()
         self.intro_messages = self.load_intro()
-
         self.create_chatbot()
 
-    
     def load_prompt(self):
         try:
             with open(self.prompt_file, "r", encoding="utf-8") as file:
@@ -36,23 +36,51 @@ class ScenarioAgent:
         except json.JSONDecodeError:
             raise ValueError(f"Intro file {self.intro_file} contains invalid JSON!")
 
-
     def create_chatbot(self):
-            # 创建聊天提示模板，包括系统提示和消息占位符
-            system_prompt = ChatPromptTemplate.from_messages([
-                ("system", self.prompt),  # 系统提示部分
-                MessagesPlaceholder(variable_name="messages"),  # 消息占位符
-            ])
+        # 定义可用的模型
+        self.models = {
+            "llama": "llama3.1:8b-instruct-q8_0",
+            "gpt4o": "gpt-4o",
+            "gpt4o_mini": "gpt-4o-mini"
+        }
 
-            # 初始化 ChatOllama 模型，配置模型参数
-            self.chatbot = system_prompt | ChatOllama(
-                model="llama3.1:8b-instruct-q8_0",  # 使用的模型名称
-                max_tokens=8192,  # 最大生成的token数
-                temperature=0.8,  # 生成文本的随机性
-            )
+        # 创建聊天提示模板
+        system_prompt = ChatPromptTemplate.from_messages([
+            ("system", self.prompt),
+            MessagesPlaceholder(variable_name="messages"),
+        ])
 
-            # 将聊天机器人与消息历史记录关联起来
+        # 初始化多个聊天机器人
+        self.chatbots = {}
+        for model_name, model_id in self.models.items():
+            if model_name == "llama":
+                self.chatbots[model_name] = system_prompt | ChatOllama(
+                    model=model_id,
+                    base_url="http://localhost:11435",
+                    max_tokens=8192,
+                    temperature=0.8,
+                )
+            else:  # gpt-4o 和 gpt-4o-mini
+                self.chatbots[model_name] = system_prompt | ChatOpenAI(
+                    model=model_id,
+                    base_url="https://api.javis3000.com/v1",  # 替换为实际的自定义 API 地址
+                    api_key=os.getenv("OPENAI_API_KEY"),  # 确保设置了环境变量
+                   
+                )
+
+        # 默认使用 llama 模型
+        self.current_model = "llama"
+        self.chatbot = self.chatbots[self.current_model]
+        self.chatbot_with_history = RunnableWithMessageHistory(self.chatbot, get_session_history)
+
+    def switch_model(self, model_name):
+        if model_name in self.models:
+            self.current_model = model_name
+            self.chatbot = self.chatbots[model_name]
             self.chatbot_with_history = RunnableWithMessageHistory(self.chatbot, get_session_history)
+            return f"已切换到 {model_name} 模型"
+        else:
+            return f"无效的模型名称: {model_name}"
 
     def start_new_session(self, session_id: str = None):
         """
@@ -62,7 +90,7 @@ class ScenarioAgent:
             session_id (str): 会话的唯一标识符
         """
         if session_id is None:
-            session_id = self.name
+            session_id = self.scenario  # 使用场景名称作为默认的会话ID
 
         history = get_session_history(session_id)
         LOG.debug(f"[history]:{history}")
@@ -74,10 +102,9 @@ class ScenarioAgent:
         else:
             return history.messages[-1].content  # 返回历史记录中的最后一条消息
 
-
     def chat_with_history(self, user_input, session_id: str = None):
         """
-        处理用户输入并生成包含聊天历史的回复，同时记录日志。
+        处理用户输入并生成包含聊天历史的回复。
         
         参数:
             user_input (str): 用户输入的消息
@@ -86,13 +113,12 @@ class ScenarioAgent:
         返回:
             str: 代理生成的回复内容
         """
-        # TODO: InMemoryStore -> DB
         if session_id is None:
-            session_id = self.name
+            session_id = self.scenario  # 使用场景名称作为默认的会话ID
 
         response = self.chatbot_with_history.invoke(
-            [HumanMessage(content=user_input)],  # 将用户输入封装为 HumanMessage
-            {"configurable": {"session_id": session_id}},  # 传入配置，包括会话ID
+            [HumanMessage(content=user_input)],
+            {"configurable": {"session_id": session_id}},
         )
         
-        return response.content  # 返回生成的回复内容
+        return response.content

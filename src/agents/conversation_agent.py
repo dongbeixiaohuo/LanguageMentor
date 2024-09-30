@@ -1,5 +1,7 @@
 import json
 import random
+import os
+from langchain_openai import ChatOpenAI
 
 from langchain_ollama.chat_models import ChatOllama  # 导入 ChatOllama 模型
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder  # 导入提示模板相关类
@@ -41,14 +43,35 @@ class ConversationAgent:
             MessagesPlaceholder(variable_name="messages"),  # 消息占位符
         ])
 
-        # 初始化 ChatOllama 模型，配置参数
-        self.chatbot = system_prompt | ChatOllama(
-            model="llama3.1:8b-instruct-q8_0",  # 使用的模型名称
-            max_tokens=8192,  # 最大生成的 token 数
-            temperature=0.8,  # 随机性配置
-        )
+        # 定义可用的模型
+        self.models = {
+            "llama": "llama3.1:8b-instruct-q8_0",
+            "gpt4o": "gpt-4o",
+            "gpt4o_mini": "gpt-4o-mini"
+        }
 
-        # 将聊天机器人与消息历史记录关联
+        # 初始化多个聊天机器人
+        self.chatbots = {}
+        for model_name, model_id in self.models.items():
+            if model_name == "llama":
+                self.chatbots[model_name] = system_prompt | ChatOllama(
+                    model=model_id,
+                    base_url="http://localhost:11435",
+                    max_tokens=8192,
+                    temperature=0.8,
+                )
+            else:  # gpt-4o 和 gpt-4o-mini
+                self.chatbots[model_name] = system_prompt | ChatOpenAI(
+                    model=model_id,
+                    base_url="https://api.javis3000.com/v1",  # 替换为实际的自定义 API 地址
+                    api_key=os.getenv("OPENAI_API_KEY"),  # 确保设置了环境变量
+                )
+
+        # 默认使用 llama 模型
+        self.current_model = "llama"
+        self.chatbot = self.chatbots[self.current_model]
+
+        # 将当前聊天机器人与消息历史记录关联
         self.chatbot_with_history = RunnableWithMessageHistory(self.chatbot, get_session_history)
 
 
@@ -86,3 +109,21 @@ class ConversationAgent:
         
         LOG.debug(response)  # 记录调试日志
         return response.content  # 返回生成的回复内容
+
+    def switch_model(self, model_name):
+        """
+        切换到指定的模型。
+
+        参数:
+            model_name (str): 要切换到的模型名称
+
+        返回:
+            str: 切换结果的消息
+        """
+        if model_name in self.models:
+            self.current_model = model_name
+            self.chatbot = self.chatbots[model_name]
+            self.chatbot_with_history = RunnableWithMessageHistory(self.chatbot, get_session_history)
+            return f"已切换到 {model_name} 模型"
+        else:
+            return f"无效的模型名称: {model_name}"
